@@ -6,6 +6,34 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+
+# loading required library if necessary
+if (! requireNamespace("GEOquery", quietly = TRUE)) {
+  BiocManager::install("GEOquery")
+}
+
+if (! requireNamespace("edgeR", quietly = TRUE)) {
+  BiocManager::install("edgeR")
+}
+
+library(GEOquery)
+library(knitr)
+library(edgeR)
+
+# downloading GEO dataset if necessary
+if (!exists("GSE")) {
+  GSE <- getGEO("GSE111972", GSEMatrix =FALSE)
+}
+
+# getting meta data
+GPL <- names(GPLList(GSE))[1]
+GPL_info <- Meta(getGEO(GPL))
+
+# loading in supplementary data
+sfiles <- getGEOSuppFiles('GSE111972')
+fnames <- rownames(sfiles)
+MS_exp <- read.delim(fnames[1],header=TRUE, check.names = FALSE)
+rownames(MS_exp) <- MS_exp$ID
 ```
 
 ## Dataset
@@ -14,18 +42,157 @@ knitr::opts_chunk$set(echo = TRUE)
 
 **Dataset Name:** Transcriptional profiling of human microglia reveals grey-white matter heterogeneity and multiple sclerosis-associated changes
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+## Dataset Overview 
 
-```{r cars}
-summary(cars)
+GEO dataset was downloaded during the setup of the page.
+
+Previously I had the opportunity to work with RNAseq data from brain samples and it was very interesting to examine the different expression profiles between different cell types in the brain especially in a diseased state.  This dataset examines the expression profiles of both the grey matter and white matter of the human microglia in both healthy donors as well as donors with Multiple Sclerosis.
+
+```{r}
+
+head(Meta(GSE))
+
+```
+**Title:** `r GPL_info$title`
+
+**Technology:** `r GPL_info$technology`
+
+**Submission Date:** `r GPL_info$submission_date`
+
+**Last Update Date:** `r GPL_info$last_update_date`
+
+**Organism:** `r GPL_info$organism`
+
+**Number of GEO datasets that use this technology:** `r length(GPL_info$series_id)`
+
+**Number of GEO samples that use this technology:** `r length(GPL_info$sample_id)`
+
+```{r}
+
+colnames(MS_exp)[2:32]
+
+```
+Each sample is the RNAseq data from the microglia cells of an individual test subject. 15 samples (5 grey matter, 10 white matter) were from 10 donors affected with Multiple Sclerosis and 16 samples (5 grey matter, 11 white matter) were from 11 control (healthy) donors.
+
+`CON_GM` = Control, grey matter
+
+`CON_WM` = control, white matter
+
+`MS_GM` = Multiple Sclerosis, grey matter
+
+`MS_WM` = Multiple Sclerosis, white matter
+
+
+## Cleaning Dataset
+
+**Number of genes with measurements:** `r dim(MS_exp)[1]`
+
+**Number of samples:** `r dim(MS_exp)[2]`
+
+
+```{r}
+
+# listing number of times Gene IDs appear in row names
+kable(sort(table(MS_exp$ID), decreasing = TRUE)[1:10])
+
 ```
 
-## Including Plots
+Since all Gene IDs only appear in the count table once, the number of unique genes in this dataset is: `r dim(MS_exp)[1]`. This also suggests that all rows in this data are genes.
 
-You can also embed plots, for example:
+**Filtering out weakly expressed genes:**
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+```{r}
+
+counts <- cpm(MS_exp[, 2:32])
+rownames(counts) <- MS_exp$ID
+kable(counts[1:10, 1:5])
+
+strong_exp <- rowSums(counts > 1) >= 3
+MS_exp_filter <- MS_exp[strong_exp, ]
+dim(MS_exp) - dim(MS_exp_filter)
+
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+As we can see this process filtered out 3834 gene IDs that were weakly expressed.
+
+**Mapping to HUGO identifiers**
+
+```{r}
+
+rownames(MS_exp)[1:18]
+
+```
+
+As we can see the rows in this count matrix are already mapped to HUGO gene IDs so no further mapping is required. Therefore no further processing regarding non-mapped rows or mulitple row mappings is required. Coverage of this dataset is also 100% for HUGO identifiers since all rows already use HUGO IDs.
+
+
+## Normalizing Dataset
+
+**Note:** The datafile retrieved from GEO appears to already be normalized, however as a proof of concept, data will be normalized again.
+
+```{r}
+
+# Based on Lecture Material using TMM method
+
+# prepping boxplot data
+MS_data_plot <- log2(cpm(MS_exp_filter[,2:32]))
+
+# prepping data for density plot
+counts_density <- apply(log2(cpm(MS_exp_filter[,3:22])), 2, density)
+
+xlim <- 0; ylim <- 0
+
+for (i in 1:length(counts_density)) {
+  xlim <- range(c(xlim, counts_density[[i]]$x)); 
+  ylim <- range(c(ylim, counts_density[[i]]$y))
+}
+
+cols <- rainbow(length(counts_density))
+ltys <- rep(1, length(counts_density))
+
+#plot the first density plot to initialize the plot
+plot(counts_density[[1]], xlim=xlim, ylim=ylim, type="n", 
+      ylab="Smoothing density of log2-CPM", main="", cex.lab = 0.85)
+
+#plot each line
+for (i in 1:length(counts_density)) lines(counts_density[[i]], col=cols[i], lty=ltys[i])
+
+#create legend
+legend("topright", colnames(MS_data_plot),  
+        col=cols, lty=ltys, cex=0.75, 
+        border ="blue",  text.col = "green4", 
+        merge = TRUE, bg = "gray90")
+
+# prepping normalized data
+filter_data_matrix <- as.matrix(MS_exp_filter[,2:32])
+rownames(filter_data_matrix) <- MS_exp_filter$ID
+norm = DGEList(counts=filter_data_matrix, group=colnames(MS_exp_filter)[2:32])
+norm = calcNormFactors(norm)
+normalized_counts <- cpm(norm)
+
+# plotting raw and normalized boxplot data
+options(warn = -1)
+
+par(mfrow=c(1,2))
+
+boxplot(MS_data_plot, xlab = "Samples", ylab = "log2 CPM", 
+        las = 2, cex = 0.5, cex.lab = 0.5,
+        cex.axis = 0.5, main = "MS RNASeq Samples")
+abline(h = median(apply(MS_data_plot, 2, median)), col = "green", 
+       lwd = 0.6, lty = "dashed")
+
+boxplot(normalized_counts, xlab = "Samples", ylab = "log2 CPM", 
+        las = 2, cex = 0.5, cex.lab = 0.5,
+        cex.axis = 0.5, main = "Noramlized MS RNASeq Samples")
+abline(h = median(apply(normalized_counts, 2, median)), col = "green", 
+       lwd = 0.6, lty = "dashed")
+
+# MDS plot
+par(mfrow=c(1,1))
+
+plotMDS(norm, labels=colnames(MS_exp_filter)[2:32])
+
+```
+
+## Final Processed Expression Data
+`MS_exp_filter`
